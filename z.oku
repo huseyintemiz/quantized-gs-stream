@@ -1,0 +1,7 @@
+- quality of PLY and PT rasterized images are not good.
+
+- GSPLAT splat visuzalizer'da (Viser), PT GS dosyalari kaliteli render oluyor ama PLY file'lar icin duzgun sonuclar cikmiyor. PLY'ler icin SH'lar duzgun handle edilmiyor gibi gorunuyor.
+
+- VQ Encode edilip save edilmis dosyalari geri decode edip visualize edebiliyoruz. Bunun icin bir ayri bir dosya formati kullanmak gerekecek. Codebook'lari vs save etmek gerekiyor.
+
+- Render quality olcumu henuz yapilmadi. Bakilacak. 

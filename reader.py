@@ -5,50 +5,50 @@ from io import BytesIO
 from typing import Optional
 from plyfile import PlyData, PlyElement
 import math
+import os
 import torch.nn.functional as F
 
-def read_gaussian_ply(ply_path):
-    """
-    Reads a PLY file storing Gaussian splat details.
-    Returns a dict with keys like 'x', 'y', 'z', 'nx', 'ny', 'nz', 'scale', 'r', 'g', 'b', etc.
-    """
-    plydata = PlyData.read(ply_path)
-    vertex = plydata['vertex'].data
 
-    # Convert to numpy structured array for easy access
-    data = {}
-    for name in vertex.dtype.names:
-        data[name] = np.array(vertex[name])
-    
-    return data
-  
-def read_gaussian_ckpt(ckpt_path,device='cuda'):
+def read_gaussian_ckpt(ckpt_path: str, device: str = 'cuda') -> dict[str, torch.Tensor]:
+    """
+    Reads a Gaussian checkpoint file and returns a dictionary with Gaussian parameters as PyTorch tensors.
 
-   
+    Args:
+        ckpt_path (str): Path to the checkpoint file.
+        device (str): Device to load the checkpoint on ('cuda' or 'cpu').
+
+    Returns:
+        dict[str, torch.Tensor]: Dictionary containing Gaussian parameters as PyTorch tensors.
+    """
+    # Load the checkpoint
     ckpt = torch.load(ckpt_path, map_location=device)["splats"]
     
+    # Extract Gaussian parameters
     gauss_data = {}
     gauss_data['means'] = ckpt["means"]
     gauss_data['quats'] = ckpt["quats"]
     gauss_data['scales'] = ckpt["scales"]
     gauss_data['opacities'] = ckpt["opacities"]
-    gauss_data['sh0'] = ckpt["sh0"] #nx1x3
-    gauss_data['shN'] = ckpt["shN"] # nxKx3
+    gauss_data['sh0'] = ckpt["sh0"]  # nx1x3
+    gauss_data['shN'] = ckpt["shN"]  # nxKx3
     
-    print("Number of Gaussians:", len( gauss_data['means']))
+    print("Number of Gaussians:", len(gauss_data['means']))
   
-
     # Concatenate sh0 and shN along the second dimension
-    gauss_data['colors'] = torch.cat([gauss_data['sh0'], gauss_data['shN']], dim=1)  # Resulting shape: [68739, 16, 3]    # gauss_data['sh_degree'] = sh_degree
-    
-    gauss_data['scales'] = torch.sigmoid(gauss_data['scales'])
+    gauss_data['colors'] = torch.cat([gauss_data['sh0'], gauss_data['shN']], dim=1)  # Resulting shape: [68739, 16, 3]
     
     return gauss_data
-        
-        
-def save_gaussian_ckpt(ckpt_path, data):
+           
+def save_gaussian_ckpt(ckpt_path: str, data: dict[str, torch.Tensor]) -> None:
     """
     Saves Gaussian splat details to a checkpoint file.
+
+    Args:
+        ckpt_path (str): Path to save the checkpoint file.
+        data (dict[str, torch.Tensor]): Dictionary containing Gaussian parameters as PyTorch tensors.
+
+    Returns:
+        None
     """
     # Create a dictionary to save
     save_dict = {
@@ -59,77 +59,95 @@ def save_gaussian_ckpt(ckpt_path, data):
         "sh0": data['colors'][:, 0:1, :],
         "shN": data['colors'][:, 1:, :],
     }
-    # ckpt = {"splats": save_dict,
-    #         "step": 0}
-    # Save the dictionary to a file
     
-    data = {"step": 0, "splats": save_dict}
-    # torch.save(ckpt.state_dict(), ckpt_path)
+    data_to_save = {"step": 0, "splats": save_dict}
+
+    # Save the data to the specified checkpoint path
+    torch.save(data_to_save, ckpt_path)
+
+def read_gaussian_ply(ply_path: str) -> dict[str, np.ndarray]:
+    """
+    Reads a PLY file storing Gaussian splat details and returns a dictionary with the data.
+
+    Args:
+        ply_path (str): Path to the PLY file.
+
+    Returns:
+        dict[str, np.ndarray]: Dictionary containing the PLY data with keys like 'x', 'y', 'z', etc.
+    """
+    # Read the PLY file
+    plydata = PlyData.read(ply_path)
+    vertex = plydata['vertex'].data
+
+    # Convert to a dictionary of numpy arrays
+    data = {}
+    for name in vertex.dtype.names:
+        data[name] = np.array(vertex[name])
     
-    torch.save(
-                    data, ckpt_path
-                )
-    
-    
-def convert_gaussian_tensor(ply_path):
-    num_sh_coeffs = 16
-    
+    return data
+  
+def convert_gaussian_tensor_np2pt(ply_path: str, sh_degree: int = 3, device: str = 'cuda') -> dict[str, torch.Tensor]:
+    """
+    Converts Gaussian data from a PLY file to PyTorch tensors.
+
+    Args:
+        ply_path (str): Path to the PLY file.
+        sh_degree (int): Degree of spherical harmonics. Default is 3.
+        device (str): Device to load the tensors on ('cuda' or 'cpu'). Default is 'cuda'.
+
+    Returns:
+        dict[str, torch.Tensor]: Dictionary containing Gaussian parameters as PyTorch tensors.
+    """
+    num_sh_coeffs = (sh_degree + 1) ** 2
+    num_sh_rest = (num_sh_coeffs-1)*3
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    # Read Gaussian data from the PLY file
     given_gs = read_gaussian_ply(ply_path)
     
     gauss_data = {}
-    
     gauss_data['means'] = np.stack([given_gs['x'], given_gs['y'], given_gs['z']], axis=1)
-    #concat rot_0, rot_1, rot_2, rot_3 to r
     gauss_data['quats'] = np.stack([given_gs['rot_0'], given_gs['rot_1'], given_gs['rot_2'], given_gs['rot_3']], axis=1)
     gauss_data['scales'] = np.stack([given_gs['scale_0'], given_gs['scale_1'], given_gs['scale_2']], axis=1)
 
     gauss_data['colors'] = np.concatenate([
         np.stack([given_gs['f_dc_0'], given_gs['f_dc_1'], given_gs['f_dc_2']], axis=1),  # DC terms (N, 3)
-        np.stack([given_gs[f'f_rest_{i}'] for i in range(45)], axis=1)  # SH coefficients (N, 45)
-    ], axis=1)  # Resulting shape: (N, 48)
+        np.stack([given_gs[f'f_rest_{i}'] for i in range(num_sh_rest)], axis=1)  # SH coefficients (N, K)
+    ], axis=1)  # Resulting shape: (N, num_sh_coeffs, 3)
 
-    gauss_data['opacities'] = given_gs['opacity'].reshape(-1, 1).squeeze(1)  # opacity
-    # Stack f_rest_0 to f_rest_44 into gauss_data['f_rest'] 
-    
+    gauss_data['opacities'] = given_gs['opacity'].reshape(-1, 1).squeeze(1)  # Opacity
+
+    # Convert numpy arrays to PyTorch tensors
     for k in gauss_data:
         if isinstance(gauss_data[k], np.ndarray):
             gauss_data[k] = torch.tensor(gauss_data[k], dtype=torch.float32).to(device)
-    
-    ##################################
-    # randomly color  ### kendi renkleri sacmaliyor anlamadim  
-    # N =  gauss_data['means'].shape[0]
-    num_sh_coeffs = 16
-    # sh_coeffs = torch.randn((N, num_sh_coeffs, 3))
-    # # Normalize DC term (first coefficient) to be in [0,1] range
-    # sh_coeffs[:, 0] = torch.sigmoid(sh_coeffs[:, 0])
-    # sh_coeffs = sh_coeffs.to(device)
-    
-    # Disable random coloring
-    # gauss_data['colors'] = sh_coeffs
+
+    # Reshape colors to match the expected shape
     gauss_data['colors'] = gauss_data['colors'].reshape(-1, num_sh_coeffs, 3)
-    # gauss_data['colors'][:, 0] = torch.sigmoid(gauss_data['colors'][:, 0])
-    
-    # Apply sigmoid to gauss_data['scales']
-    gauss_data['scales'] = torch.sigmoid(gauss_data['scales'])
-    ##################################
 
     return gauss_data
             
-def save_gaussian_ply(ply_path, data):
+def save_gaussian_ply(ply_path: str, data: dict[str, np.ndarray]) -> None:
     """
     Saves Gaussian splat details to a PLY file.
+
+    Args:
+        ply_path (str): Path to save the PLY file.
+        data (dict[str, np.ndarray]): Dictionary containing Gaussian parameters as NumPy arrays.
+
+    Returns:
+        None
     """
-    # Create a structured array
+    # Create a structured array for the PLY file
     vertex = np.zeros(data['x'].shape[0], dtype=[(name, 'f4') for name in data.keys()])
     for name in data.keys():
         vertex[name] = data[name]
 
     # Create a PlyData object
-    plydata = PlyData([('vertex', vertex)], text=True)
+    plydata = PlyData([PlyElement.describe(vertex, 'vertex')], text=True)
+    # plydata = PlyData([('vertex', vertex)], text=True)
 
-    # Write to file
+    # Write to the specified PLY file path
     plydata.write(ply_path)
     
 def splat2ply_bytes(
@@ -267,31 +285,17 @@ def export_splats(
 
 # add main
 if __name__ == "__main__":
-    # import sys
-    # if len(sys.argv) != 2:
-    #     print("Usage: python reader.py <path_to_ply>")
-    #     sys.exit(1)
-    # ply_path = sys.argv[1]   
-
-    # Example usage:
-    # details = read_gaussian_ply('gs-data/scannet_1.ply')
-    # details = read_gaussian_ply('points3d.ply')
-
-    # details = read_gaussian_ply('/home/dipcik/avatar/vq-stream/compressed_model/point_cloud.ply')
-    # ply_path = 'gs-data/gaussians2v.ply'
-    ply_path = "/home/dipcik/avatar/vq-stream/gs-data/gaussian_splatting/FO_dataset/drjohnson/point_cloud/iteration_30000/point_cloud.ply"
-    ply_path ="/home/dipcik/avatar/gs-env/gsplat/examples/results/benchmark/room/ply/point_cloud_9999.ply"
+    #######################################################
+    # PLY FILE Operations check
     ply_path =  "/home/dipcik/avatar/gs-env/gsplat/examples/results/benchmark/man/ply/point_cloud_9999.ply"
     details = read_gaussian_ply(ply_path)
     
     print(details.keys())  # e.g. dict_keys(['x', 'y', 'z', 'nx', 'ny', 'nz', 'scale', 'r', 'g', 'b'])
-    print(details['x'].shape)  # e.g. (N,)
+    print(f"Number of Gaussians: {details['x'].shape[0]}")
     
-    gauss_data = convert_gaussian_tensor(ply_path)
+    gauss_data = convert_gaussian_tensor_np2pt(ply_path)
     
- 
-    # data = splat2ply_bytes(means, scales, quats, opacities, sh0, shN)
-    
+    ply_export_path = "results/ply_export.ply"
     export_splats(
         means=gauss_data['means'],
         scales=gauss_data['scales'],
@@ -299,8 +303,24 @@ if __name__ == "__main__":
         opacities=gauss_data['opacities'],
         sh0=gauss_data['colors'][:, 0:1, :],
         shN=gauss_data['colors'][:, 1:, :],
-        # sh0=sh0,
-        # shN=shN,
-        # format="ply",
-        save_to=f"abcdd.ply",
+        save_to=ply_export_path,
     )
+    if os.path.exists(ply_export_path):
+        print("Successfully exported ply_export.ply")
+    else:
+        print("Export failed")
+    
+    #######################################################
+    # PT FILE Operations check
+    ckpt_path = "/home/dipcik/avatar/gs-env/gsplat/examples/results/benchmark/man/ckpts/ckpt_9999_rank0.pt"
+    gaussians = read_gaussian_ckpt(ckpt_path)
+    
+    print(gaussians.keys())  # e.g. dict_keys(['means', 'quats', 'scales', 'opacities', 'sh0', 'shN'])
+    save_gaussian_ckpt(
+        ckpt_path="results/gaussian_ckpt.pt",
+        data=gaussians
+    )
+    if os.path.exists("results/gaussian_ckpt.pt"):
+        print("Successfully saved gaussian_ckpt.pt")
+    else:
+        print("Save failed")

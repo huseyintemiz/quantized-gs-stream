@@ -1,14 +1,14 @@
 import torch
 import numpy as np
 from sklearn.cluster import KMeans
-from render import render_gaussians
+
 from gsplat import rasterization
 from PIL import Image
 import constriction
 
 from vector_quantize_pytorch import VectorQuantize
 from vector_quantize_pytorch import ResidualVQ
-from reader import read_gaussian_ply,export_splats,convert_gaussian_tensor,read_gaussian_ckpt,save_gaussian_ckpt
+from reader import read_gaussian_ply,export_splats,convert_gaussian_tensor_np2pt,read_gaussian_ckpt,save_gaussian_ckpt
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -42,6 +42,9 @@ def render_image(gaussians, camera,sh_degree=3):
     
     # N = gaussians['means'].shape[0]  # Number of Gaussians
     color_sh_param = (sh_degree + 1) ** 2  # K = 16 for sh_degree=3
+    
+    # 
+    gaussians['scales'] = torch.sigmoid(gaussians['scales']) #huseyin
     
     colors_rendered, alphas, meta = rasterization(gaussians['means'], gaussians['quats'], gaussians['scales'],gaussians['opacities'],gaussians['colors'], camera['viewmat'], camera["K"], camera['width'], camera['height'],sh_degree=sh_degree)
     # Convert rendered image to numpy and save
@@ -134,7 +137,7 @@ def plot_gaussian_splats_3D(gaussians, camera,camera_extras):
     ax.legend()
 
     # Save or show the plot
-    plt.savefig("results/scatter_with_camera_planeXXX.png")
+    plt.savefig("results/scatter_with_camera_plane.png")
  
     print('Done 3d plot')
 
@@ -337,7 +340,6 @@ class NSVQCompressor:
             recon[attr] = self.codebooks[attr].get_output_from_indices(compressed_data[attr])
         return recon
    
-
 def entropy_encode(indices_tensor, symbol_min=0, symbol_max=10000):
     """
     Encode a tensor of indices into a bitstream using arithmetic coding.
@@ -393,7 +395,8 @@ if __name__ == "__main__":
     
     DUMMY = False
     DUMMY_CAM = False
-    FILTER_OUTLIERS = False
+    FILTER_OUTLIERS = True
+    DOWNSAMPLE = 5000 # Set to 0 to disable downsampling
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -412,22 +415,35 @@ if __name__ == "__main__":
 
         gaussians = {
             'means': torch.rand(N, 3, dtype=torch.float32, device=device),      # coordinates
-            'opacities': torch.rand(N, 1, dtype=torch.float32, device=device),  # opacity
+            'opacities': torch.rand(N, dtype=torch.float32, device=device),  # opacity
             'scales': torch.rand(N, 3, dtype=torch.float32, device=device),     # scale
             'quats': torch.rand(N, 4, dtype=torch.float32, device=device),      # rotation
-            'colors': torch.rand(N, 48, dtype=torch.float32, device=device),    # color
+            'colors': torch.rand(N,16,3, dtype=torch.float32, device=device),    # color
         }
     else:
         ###################### READ REAL DATA ######################
-        ply_path = "/home/dipcik/avatar/gs-env/gsplat/examples/results/benchmark/man/ply/point_cloud_9999.ply"
-        # ply_path = "gs-data/gaussians2v.ply"
-        # ply_path = "/home/dipcik/avatar/gs-env/gsplat/examples/results/benchmark/room/ply/point_cloud_9999.ply"
         # LOAD PLY FILE
-        # gaussians = convert_gaussian_tensor(ply_path)
+        # ply_path = "/home/dipcik/avatar/gs-env/gsplat/examples/results/benchmark/man/ply/point_cloud_9999.ply"
+        # ply_path = "/home/dipcik/avatar/gs-env/gsplat/examples/results/benchmark/room/ply/point_cloud_9999.ply"
+        # gaussians = convert_gaussian_tensor_np2pt(ply_path)
         
+        # LOAD PT CKPT file Gaussians
         ckpt_path = "/home/dipcik/avatar/gs-env/gsplat/examples/results/benchmark/man/ckpts/ckpt_9999_rank0.pt"
         gaussians = read_gaussian_ckpt(ckpt_path)
-        
+    
+    if DOWNSAMPLE:  # Downsample
+        # Get random indices in range [0, N)
+        N = gaussians['means'].shape[0]
+        indices = np.random.choice(N, size=DOWNSAMPLE, replace=False)
+    
+        # Downsample the data
+        for k in gaussians:
+            if gaussians[k].shape[0] == N:
+                if isinstance(gaussians[k], np.ndarray):
+                    gaussians[k] = gaussians[k][indices]
+                elif isinstance(gaussians[k], torch.Tensor):
+                    gaussians[k] = gaussians[k][indices, ...]
+              
 
     print("Opacities Min:", gaussians['opacities'].min().item())
     print("Opacities Max:", gaussians['opacities'].max().item())
@@ -465,7 +481,6 @@ if __name__ == "__main__":
                 gaussians[k] = gaussians[k][inside_mask]
     ###########################
     
-
     # Configuration (smaller codebooks for faster training)
     config = {
         'K_scales': 256,     # 8 bits
@@ -567,53 +582,7 @@ if __name__ == "__main__":
         print("Bounding Box Max:", max_coords)
         print("Bounding Box Centroid:", centroid)
         print("Camera Position:", cam_pos)
-        
-        if False:
-            fig = plt.figure()
-            ax = fig.add_subplot(111, projection='3d')
 
-            # Plot bounding box
-            ax.scatter(min_coords[0].item(), min_coords[1].item(), min_coords[2].item(), c='r', label='Min')
-            ax.scatter(max_coords[0].item(), max_coords[1].item(), max_coords[2].item(), c='g', label='Max')
-
-            # Plot centroid
-            ax.scatter(centroid[0].item(), centroid[1].item(), centroid[2].item(), c='b', label='Centroid')
-
-            # Plot camera position
-            ax.scatter(cam_pos[0].item(), cam_pos[1].item(), cam_pos[2].item(), c='y', label='Camera')
-
-            ax.legend()
-            # plt.show()
-            plt.savefig("results/camera_position.png")
-            #####################################
-        if False:
-            # Scatter all Gaussian splats
-            fig = plt.figure()
-            ax = fig.add_subplot(111, projection='3d')
-
-            # Scatter all points (means)
-            means_np = gaussians['means'].cpu().numpy()  # Convert to numpy for plotting
-            ax.scatter(means_np[:, 0], means_np[:, 1], means_np[:, 2], c='b', s=1, label='Gaussians')
-
-            # Plot bounding box
-            ax.scatter(min_coords[0].item(), min_coords[1].item(), min_coords[2].item(), c='r', label='Min')
-            ax.scatter(max_coords[0].item(), max_coords[1].item(), max_coords[2].item(), c='g', label='Max')
-
-            # Plot centroid
-            ax.scatter(centroid[0].item(), centroid[1].item(), centroid[2].item(), c='orange', label='Centroid')
-
-            # Plot camera position
-            ax.scatter(cam_pos[0].item(), cam_pos[1].item(), cam_pos[2].item(), c='y', label='Camera')
-
-            # Add labels and legend
-            ax.set_xlabel('X')
-            ax.set_ylabel('Y')
-            ax.set_zlabel('Z')
-            ax.legend()
-
-            # Save or show the plot
-            plt.savefig("results/scatter_all_points.png")
-        ####################################################
 
         # plot_gaussian_splats_3D(gaussians, camera,camera_extras)
         plotly_splat_3D(gaussians_recon, camera,camera_extras)
@@ -626,8 +595,8 @@ if __name__ == "__main__":
 
     image,_,_ = render_image(gaussians, camera,sh_degree=sh_degree)
     image_recon,_,_ = render_image(gaussians_recon, camera,sh_degree=sh_degree)
-
-
+   
+   
     # Calculate pixel-wise difference (L1 norm per pixel)
     pixel_diff = np.abs(image.astype(np.int32) - image_recon.astype(np.int32))
     mean_pixel_diff = pixel_diff.mean()
@@ -712,4 +681,3 @@ if __name__ == "__main__":
     attr = 'scales'  # example attribute
     print(f"Original : {compressed[attr][:10]}")
     print(f"Decoded  : {decompressed[attr][:10]}")
-    
